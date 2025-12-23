@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import Navbar from './components/Navbar';
 import { AppState, TailoredResult } from './types';
 import { tailorResume } from './services/geminiService';
@@ -13,8 +13,14 @@ import {
   Download,
   Copy,
   RefreshCcw,
-  Plus
+  Plus,
+  Loader2
 } from 'lucide-react';
+import * as pdfjsLib from 'pdfjs-dist';
+import mammoth from 'mammoth';
+
+// Configure PDF.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.mjs`;
 
 const App: React.FC = () => {
   const [resumeText, setResumeText] = useState('');
@@ -22,19 +28,66 @@ const App: React.FC = () => {
   const [status, setStatus] = useState<AppState>(AppState.IDLE);
   const [result, setResult] = useState<TailoredResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isParsing, setIsParsing] = useState(false);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const extractTextFromPDF = async (arrayBuffer: ArrayBuffer): Promise<string> => {
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items.map((item: any) => item.str).join(' ');
+      fullText += pageText + '\n';
+    }
+    return fullText;
+  };
+
+  const extractTextFromDocx = async (arrayBuffer: ArrayBuffer): Promise<string> => {
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    return result.value;
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target?.result;
-      if (typeof text === 'string') {
-        setResumeText(text);
+    setIsParsing(true);
+    setError(null);
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      let text = '';
+
+      if (file.type === 'application/pdf') {
+        text = await extractTextFromPDF(arrayBuffer);
+      } else if (
+        file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || 
+        file.name.endsWith('.docx')
+      ) {
+        text = await extractTextFromDocx(arrayBuffer);
+      } else if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+        const reader = new FileReader();
+        text = await new Promise((resolve) => {
+          reader.onload = (event) => resolve(event.target?.result as string);
+          reader.readAsText(file);
+        });
+      } else {
+        throw new Error("Unsupported file type. Please upload a PDF, Word (.docx), or Text (.txt) file.");
       }
-    };
-    reader.readAsText(file);
+
+      if (!text.trim()) {
+        throw new Error("Could not extract any text from the document. Please try a different file.");
+      }
+
+      setResumeText(text);
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "Failed to process the file.");
+    } finally {
+      setIsParsing(false);
+      // Reset input value so the same file can be uploaded again if needed
+      e.target.value = '';
+    }
   };
 
   const handleTailor = async () => {
@@ -80,27 +133,37 @@ const App: React.FC = () => {
                 </div>
                 
                 <p className="text-slate-500 text-sm mb-4">
-                  Paste your current resume text or upload a .txt file.
+                  Paste your resume or upload a PDF, Word (.docx), or Text file.
                 </p>
 
                 <div className="space-y-4">
-                  <textarea
-                    className="w-full h-64 p-4 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none resize-none font-mono"
-                    placeholder="Paste your current resume here..."
-                    value={resumeText}
-                    onChange={(e) => setResumeText(e.target.value)}
-                  />
+                  <div className="relative">
+                    <textarea
+                      className="w-full h-64 p-4 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none resize-none font-mono"
+                      placeholder="Paste your current resume here..."
+                      value={resumeText}
+                      onChange={(e) => setResumeText(e.target.value)}
+                    />
+                    {isParsing && (
+                      <div className="absolute inset-0 bg-white/60 backdrop-blur-[1px] flex items-center justify-center rounded-xl">
+                        <div className="flex flex-col items-center gap-2">
+                          <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
+                          <span className="text-sm font-semibold text-slate-700">Extracting text...</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                   
                   <div className="flex items-center gap-4">
                     <label className="flex-1 cursor-pointer group">
                       <div className="flex items-center justify-center gap-2 border-2 border-dashed border-slate-200 rounded-xl py-4 group-hover:border-blue-400 group-hover:bg-blue-50 transition-all">
                         <Plus className="w-4 h-4 text-slate-400 group-hover:text-blue-600" />
-                        <span className="text-sm font-medium text-slate-600 group-hover:text-blue-600">Upload Text File</span>
+                        <span className="text-sm font-medium text-slate-600 group-hover:text-blue-600">Upload PDF or Word</span>
                       </div>
                       <input 
                         type="file" 
                         className="hidden" 
-                        accept=".txt" 
+                        accept=".pdf,.docx,.txt" 
                         onChange={handleFileUpload}
                       />
                     </label>
@@ -137,9 +200,9 @@ const App: React.FC = () => {
 
               <button
                 onClick={handleTailor}
-                disabled={status === AppState.LOADING}
+                disabled={status === AppState.LOADING || isParsing}
                 className={`w-full py-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-200 ${
-                  status === AppState.LOADING 
+                  status === AppState.LOADING || isParsing
                     ? 'bg-slate-200 text-slate-400 cursor-not-allowed' 
                     : 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:opacity-90 active:scale-[0.98]'
                 }`}
